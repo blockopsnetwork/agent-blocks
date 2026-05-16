@@ -1,4 +1,6 @@
 import { AgentJob, IssueStatus } from '../../types';
+import { AgentPipeline, PipelineStage } from '../../types/pipeline';
+import { AgentRole } from '../../agents/registry';
 
 const STATUS_EMOJI: Record<IssueStatus, string> = {
   queued:     ':hourglass_flowing_sand:',
@@ -134,6 +136,140 @@ export function buildApprovalMessage(jobId: string, action: string, details: str
         ],
       },
     ],
+  };
+}
+
+// ── Pipeline progress view ─────────────────────────────────────────────────
+
+const ROLE_EMOJI: Record<AgentRole, string> = {
+  'principal-architect': ':building_construction:',
+  'devops-architect':    ':gear:',
+  'coding-engineer':     ':computer:',
+  'code-reviewer':       ':mag:',
+};
+
+const ROLE_LABEL: Record<AgentRole, string> = {
+  'principal-architect': 'Principal Architect',
+  'devops-architect':    'DevOps Architect',
+  'coding-engineer':     'Senior Engineer',
+  'code-reviewer':       'Code Reviewer',
+};
+
+const STAGE_STATUS_ICON: Record<PipelineStage['status'], string> = {
+  pending:   ':white_circle:',
+  running:   ':large_yellow_circle:',
+  completed: ':large_green_circle:',
+  failed:    ':red_circle:',
+  skipped:   ':white_circle:',
+};
+
+export function buildPipelineMessage(pipeline: AgentPipeline, issueTitle: string, issueUrl: string) {
+  const allDone = pipeline.stages.every(s =>
+    ['completed', 'failed', 'skipped'].includes(s.status)
+  );
+  const anyFailed = pipeline.stages.some(s => s.status === 'failed');
+  const hasPR = !!pipeline.prUrl;
+
+  const stageLines = pipeline.stages
+    .filter(s => s.status !== 'skipped')
+    .map(s => {
+      const icon = STAGE_STATUS_ICON[s.status];
+      const label = ROLE_LABEL[s.role];
+      const emoji = ROLE_EMOJI[s.role];
+      const duration = s.startedAt && s.completedAt
+        ? ` _(${Math.round((s.completedAt.getTime() - s.startedAt.getTime()) / 1000)}s)_`
+        : s.status === 'running' ? ' _running..._' : '';
+      return `${icon} ${emoji} *${label}*${duration}`;
+    })
+    .join('\n');
+
+  const header = hasPR
+    ? `:tada: *PR ready* — <${issueUrl}|${issueTitle}>`
+    : anyFailed
+    ? `:x: *Agent pipeline failed* — <${issueUrl}|${issueTitle}>`
+    : `:large_yellow_circle: *Working on* — <${issueUrl}|${issueTitle}>`;
+
+  const blocks: object[] = [
+    { type: 'section', text: { type: 'mrkdwn', text: header } },
+    { type: 'section', text: { type: 'mrkdwn', text: stageLines } },
+  ];
+
+  // Architect plan summary — shown once plan is ready
+  if (pipeline.architectOutput) {
+    const plan = pipeline.architectOutput;
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Approach*\n${plan.approach}` },
+        { type: 'mrkdwn', text: `*Risk*\n${plan.riskLevel} — ${plan.blastRadius}` },
+      ],
+    });
+  }
+
+  // DevOps concerns — shown if any
+  if (pipeline.devopsOutput?.hasInfraConcerns) {
+    const concerns = [
+      ...pipeline.devopsOutput.securityIssues,
+      ...pipeline.devopsOutput.deploymentRisks,
+    ].slice(0, 3);
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:warning: *DevOps flags*\n${concerns.map(c => `• ${c}`).join('\n')}`,
+      },
+    });
+  }
+
+  // Reviewer summary — shown after code review
+  if (pipeline.reviewOutput) {
+    const review = pipeline.reviewOutput;
+    const reviewIcon = review.overall === 'approve'
+      ? ':white_check_mark:'
+      : review.overall === 'request_changes'
+      ? ':x:'
+      : ':speech_balloon:';
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `${reviewIcon} *Code review* (score: ${(review.score * 100).toFixed(0)}%)\n${review.summary}`,
+      },
+    });
+    if (review.issues.filter(i => i.severity === 'critical' || i.severity === 'major').length > 0) {
+      const topIssues = review.issues
+        .filter(i => i.severity !== 'minor')
+        .slice(0, 3)
+        .map(i => `• \`${i.file}\` — ${i.description}`)
+        .join('\n');
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: topIssues },
+      });
+    }
+  }
+
+  // PR button
+  if (hasPR) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: 'View PR', emoji: true },
+          style: 'primary',
+          url: pipeline.prUrl,
+          action_id: 'view_pr',
+        },
+      ],
+    });
+  }
+
+  return {
+    text: hasPR ? `PR ready — ${issueTitle}` : `Working on ${issueTitle}`,
+    blocks,
   };
 }
 
