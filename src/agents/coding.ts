@@ -1,6 +1,7 @@
-import { Agent } from '@cursor/sdk';
+import { Octokit } from '@octokit/rest';
 import { AgentContext, AgentPlan } from '../types';
-import { buildCodingPrompt } from './prompt';
+import { registerJob, unregisterJob } from '../api/callback';
+import { logger } from '../logger';
 
 export interface CodingResult {
   prUrl: string;
@@ -8,56 +9,87 @@ export interface CodingResult {
   summary: string;
 }
 
+const GH_WORKFLOW_FILE = 'fix-issue.yml';
+const WORKFLOW_TIMEOUT_MS = 35 * 60 * 1000; // 35 min (workflow timeout is 30)
+const POLL_INTERVAL_MS = 15_000;
+
 export async function runCodingAgent(
   ctx: AgentContext,
   plan: AgentPlan,
   attempt: number,
-  onEvent?: (type: string, data: unknown) => void
+  onEvent?: (type: string, data: unknown) => void,
 ): Promise<CodingResult> {
   const { owner, name } = ctx.issue.repo;
+  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
-  await using agent = await Agent.create({
-    cloud: {
-      repos: [{ name: `${owner}/${name}` }],
-      autoCreatePR: true,
-      envVars: {
-        GITHUB_ISSUE_NUMBER: String(ctx.issue.number),
-        GITHUB_ISSUE_URL: ctx.issue.url,
-      },
+  const callbackUrl = process.env.BLOCKS_CALLBACK_URL ?? '';
+  if (!callbackUrl) throw new Error('BLOCKS_CALLBACK_URL is not set');
+
+  // Encode context for the agent-worker (plan + devops review embedded)
+  const workerCtx = {
+    issue: ctx.issue,
+    plan: {
+      approach: plan.approach,
+      files: plan.files,
+      testStrategy: plan.testStrategy,
+      blastRadius: plan.riskLevel,
     },
-    // Sub-agent for writing tests — keeps coding agent focused on the fix
-    agents: {
-      'test-writer': {
-        description: 'Writes and updates tests for changed code',
-        prompt: 'Write thorough tests that cover the fix and edge cases. Follow existing test patterns in the repo. Do not over-test.',
-        model: 'inherit',
+    devopsReview: null,
+    attempt,
+  };
+  const contextB64 = Buffer.from(JSON.stringify(workerCtx)).toString('base64');
+
+  // Register event emitter before dispatching (no race condition)
+  const emitter = registerJob(ctx.issue.id);
+  const jobId   = ctx.issue.id;
+
+  try {
+    logger.info({ owner, repo: name, issueNumber: ctx.issue.number }, 'dispatching GHA workflow');
+
+    await octokit.actions.createWorkflowDispatch({
+      owner: 'blockopsnetwork',
+      repo:  'agent-blocks',
+      workflow_id: GH_WORKFLOW_FILE,
+      ref: 'main',
+      inputs: {
+        issue_number: String(ctx.issue.number),
+        repo_owner:   owner,
+        repo_name:    name,
+        job_id:       jobId,
+        attempt:      String(attempt),
+        callback_url: callbackUrl,
+        context_b64:  contextB64,
       },
-    },
-  });
+    });
 
-  const prompt = buildCodingPrompt(ctx, plan, attempt);
-  const run = await agent.send(prompt);
+    logger.info({ jobId }, 'workflow dispatched, waiting for callback events');
 
-  let prUrl = '';
-  let summary = '';
+    // Await done/error event from the agent-worker via callback server
+    return await new Promise<CodingResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error(`GHA workflow timed out after ${WORKFLOW_TIMEOUT_MS / 60_000}min`));
+      }, WORKFLOW_TIMEOUT_MS);
 
-  for await (const event of run.stream()) {
-    onEvent?.(event.type, event);
+      emitter.on('event', (event: Record<string, unknown>) => {
+        onEvent?.(String(event.type), event);
 
-    if (event.type === 'assistant') {
-      // Capture last assistant message as summary
-      summary = typeof event === 'object' && 'content' in event
-        ? String((event as any).content).slice(0, 500)
-        : summary;
-    }
+        if (event.type === 'done') {
+          clearTimeout(timeout);
+          const prUrl = String(event.prUrl ?? '');
+          if (!prUrl) {
+            reject(new Error('Workflow reported done but no prUrl in payload'));
+            return;
+          }
+          resolve({ prUrl, branch: '', summary: String(event.summary ?? '') });
+        }
+
+        if (event.type === 'error') {
+          clearTimeout(timeout);
+          reject(new Error(String(event.message ?? 'Unknown agent-worker error')));
+        }
+      });
+    });
+  } finally {
+    unregisterJob(jobId);
   }
-
-  const gitInfo = await run.conversation();
-  // Extract PR URL from run metadata or conversation
-  const prMatch = JSON.stringify(gitInfo).match(/https:\/\/github\.com\/[^\s"]+\/pull\/\d+/);
-  if (prMatch) prUrl = prMatch[0];
-
-  if (!prUrl) throw new Error('Agent completed but no PR URL found');
-
-  return { prUrl, branch: '', summary };
 }
