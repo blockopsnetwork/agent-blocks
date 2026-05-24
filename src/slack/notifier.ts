@@ -1,4 +1,4 @@
-import { WebClient } from '@slack/web-api';
+import { WebClient, ChatPostMessageArguments } from '@slack/web-api';
 import { AgentJob } from '../types';
 import { buildProgressMessage, buildApprovalMessage } from './ui/blocks';
 
@@ -6,12 +6,12 @@ export class SlackNotifier {
   constructor(private client: WebClient) {}
 
   // Post initial ack in thread, returns the message ts for future updates
-  async postAck(channel: string, threadTs: string, message: object): Promise<string> {
+  async postAck(channel: string, threadTs: string, message: Record<string, unknown>): Promise<string> {
     const res = await this.client.chat.postMessage({
       channel,
       thread_ts: threadTs,
       ...message,
-    });
+    } as ChatPostMessageArguments);
     return res.ts as string;
   }
 
@@ -29,12 +29,12 @@ export class SlackNotifier {
   }
 
   // Post a new message in thread (for approval requests, important milestones)
-  async postInThread(job: AgentJob, message: object): Promise<string> {
+  async postInThread(job: AgentJob, message: Record<string, unknown>): Promise<string> {
     const res = await this.client.chat.postMessage({
       channel: job.slackThread.channel,
       thread_ts: job.slackThread.ts,
       ...message,
-    });
+    } as ChatPostMessageArguments);
     return res.ts as string;
   }
 

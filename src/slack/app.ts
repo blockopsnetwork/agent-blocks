@@ -2,6 +2,8 @@ import { App } from '@slack/bolt';
 import { Orchestrator } from '../orchestrator';
 import { GitHubClient } from '../context/github';
 import { registerFixCommand } from './commands/fix';
+import { registerArchitectCommand } from './commands/architect';
+import { resolveConfirmation } from '../api/confirmation';
 
 export function createSlackApp(orchestrator: Orchestrator, github: GitHubClient): App {
   const app = new App({
@@ -13,32 +15,38 @@ export function createSlackApp(orchestrator: Orchestrator, github: GitHubClient)
   // @block fix / status / cancel / list
   registerFixCommand(app, orchestrator, github);
 
+  // @block architect <task> / @block devopsec <task>
+  registerArchitectCommand(app);
+
   // Approve/deny button handlers
-  app.action(/^approve:(.+)$/, async ({ ack, action, body, client }) => {
+  // action_id format: approve:{jobId}:{requestId}  or  deny:{jobId}:{requestId}
+  app.action(/^approve:(.+)$/, async ({ ack, action, body, client }: any) => {
     await ack();
-    // TODO: wire approval response to waiting agent run
-    const jobId = (action as any).action_id.split(':')[1];
+    const parts = (action as any).action_id.split(':');
+    const requestId = parts.slice(2).join(':');
+    resolveConfirmation(requestId, true);
     await client.chat.update({
       channel: body.channel?.id ?? '',
       ts: body.message?.ts ?? '',
-      text: ':white_check_mark: Approved',
+      text: ':white_check_mark: Approved — agent proceeding',
       blocks: [],
     });
   });
 
-  app.action(/^deny:(.+)$/, async ({ ack, action, body, client }) => {
+  app.action(/^deny:(.+)$/, async ({ ack, action, body, client }: any) => {
     await ack();
-    const jobId = (action as any).action_id.split(':')[1];
+    const parts = (action as any).action_id.split(':');
+    const requestId = parts.slice(2).join(':');
+    resolveConfirmation(requestId, false);
     await client.chat.update({
       channel: body.channel?.id ?? '',
       ts: body.message?.ts ?? '',
-      text: ':no_entry: Denied',
+      text: ':no_entry: Denied — agent will choose a safer approach',
       blocks: [],
     });
-    orchestrator.cancelByIssueNumber(parseInt(jobId));
   });
 
-  app.action(/^retry_job:(.+)$/, async ({ ack, action, body, client }) => {
+  app.action(/^retry_job:(.+)$/, async ({ ack, action, body, client }: any) => {
     await ack();
     // Re-enqueue handled by orchestrator retry logic automatically
     await client.chat.update({
@@ -49,10 +57,10 @@ export function createSlackApp(orchestrator: Orchestrator, github: GitHubClient)
     });
   });
 
-  app.action(/^cancel_job:(.+)$/, async ({ ack, action, body, client }) => {
+  app.action(/^cancel_job:(.+)$/, async ({ ack, action, body, client }: any) => {
     await ack();
     const jobId = (action as any).action_id.split(':')[1];
-    orchestrator.cancelByIssueNumber(parseInt(jobId));
+    await orchestrator.cancelByIssueNumber(parseInt(jobId));
     await client.chat.update({
       channel: body.channel?.id ?? '',
       ts: body.message?.ts ?? '',

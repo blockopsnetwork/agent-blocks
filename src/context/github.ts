@@ -72,7 +72,7 @@ export class GitHubClient {
       const { data } = await this.octokit.search.issuesAndPullRequests({
         q: `repo:${owner}/${repo} is:issue is:closed ${keywords}`,
         per_page: 5,
-        sort: 'relevance',
+        sort: 'updated',
       });
       return data.items.map(i => ({ number: i.number, title: i.title }));
     } catch {
