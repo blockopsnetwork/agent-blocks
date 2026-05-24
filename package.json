@@ -12,10 +12,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "@cursor/sdk": "^0.1.0",
     "@octokit/rest": "^21.0.0",
     "@slack/bolt": "^4.0.0",
     "@slack/web-api": "^7.0.0",
+    "@types/express": "^4.17.0",
+    "express": "^4.21.0",
+    "ioredis": "^5.10.1",
+    "pino": "^9.0.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
