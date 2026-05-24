@@ -10,6 +10,18 @@ export interface CodingResult {
 }
 
 const GH_WORKFLOW_FILE = 'fix-issue.yml';
+
+// External oracle: confirm PR exists on GitHub before declaring success.
+// Mirrors Goose's SuccessCheck shell oracle — ground truth, not LLM self-report.
+async function verifyPrExists(octokit: Octokit, prUrl: string): Promise<void> {
+  const match = prUrl.match(/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
+  if (!match) throw new Error(`Cannot parse PR URL: ${prUrl}`);
+  const [, owner, repo, num] = match;
+  const pr = await octokit.pulls.get({ owner, repo, pull_number: parseInt(num, 10) });
+  if (pr.data.state === 'closed') {
+    throw new Error(`PR #${num} exists but is already closed`);
+  }
+}
 const WORKFLOW_TIMEOUT_MS = 35 * 60 * 1000; // 35 min (workflow timeout is 30)
 const POLL_INTERVAL_MS = 15_000;
 
@@ -80,7 +92,10 @@ export async function runCodingAgent(
             reject(new Error('Workflow reported done but no prUrl in payload'));
             return;
           }
-          resolve({ prUrl, branch: '', summary: String(event.summary ?? '') });
+          // Shell oracle: verify the PR actually exists — don't trust agent self-report.
+          verifyPrExists(octokit, prUrl)
+            .then(() => resolve({ prUrl, branch: '', summary: String(event.summary ?? '') }))
+            .catch(err => reject(new Error(`PR verification failed: ${err.message}`)));
         }
 
         if (event.type === 'error') {
